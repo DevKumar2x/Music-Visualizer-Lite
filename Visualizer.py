@@ -4,7 +4,7 @@ import numpy as np
 import sys
 
 # ================= CONFIG =================
-AUDIO_FILE = "Ek_din01.wav"
+AUDIO_FILE = "Music/Laapata.wav"
 WINDOW_WIDTH = 1200
 WINDOW_HEIGHT = 800
 FPS = 60
