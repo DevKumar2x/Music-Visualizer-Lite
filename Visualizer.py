@@ -2,10 +2,11 @@ import pygame
 import wave
 import numpy as np
 from pygame.locals import DOUBLEBUF, OPENGL, QUIT
-from OpenGL.GL import  (
+
+from OpenGL.GL import (
     glCreateShader, glShaderSource, glCompileShader,
-    glCreateProgram, glAttachShader, glLinkProgram,
-    glUseProgram, glGetUniformLocation, glUniform1f,
+    glCreateProgram, glAttachShader, glLinkProgram, glUseProgram,
+    glGetUniformLocation, glUniform1f,
     glClear, glEnableClientState, glDisableClientState,
     glVertexPointer, glDrawArrays,
     GL_VERTEX_SHADER, GL_FRAGMENT_SHADER,
@@ -18,22 +19,21 @@ WIDTH, HEIGHT = 1280, 800
 FPS = 60
 FFT_SIZE = 1024
 
-# === SHADERS ===
+# === SHADERS (LEGACY SAFE) ===
 VERTEX_SHADER = """
-#version 330
-layout (location = 0) in vec2 position;
+#version 120
+attribute vec2 position;
 void main() {
     gl_Position = vec4(position, 0.0, 1.0);
 }
 """
 
 FRAGMENT_SHADER = """
-#version 330
-out vec4 FragColor;
+#version 120
 uniform float intensity;
 void main() {
     vec3 color = vec3(0.2, 0.9, 1.0) * intensity;
-    FragColor = vec4(color, 1.0);
+    gl_FragColor = vec4(color, 1.0);
 }
 """
 
@@ -66,14 +66,17 @@ wf = wave.open(AUDIO_FILE, 'rb')
 rate = wf.getframerate()
 frames_per_tick = rate // FPS
 
-prev_spectrum = np.zeros(FFT_SIZE // 2 + 1)
-onset_strength = 0
-
-# === MAIN LOOP ===
-running = True
 pygame.mixer.music.load(AUDIO_FILE)
 pygame.mixer.music.play()
 
+# === ONSET STATE ===
+spec_size = FFT_SIZE // 2 + 1
+prev_spectrum = np.zeros(spec_size)
+band_mean = np.ones(spec_size)
+onset_strength = 0.0
+
+# === MAIN LOOP ===
+running = True
 while running:
     for event in pygame.event.get():
         if event.type == QUIT:
@@ -84,29 +87,28 @@ while running:
         break
 
     audio = np.frombuffer(data, dtype=np.int16)
-    audio = audio[::2] / 32768.0  # left channel
+    audio = audio[::2] / 32768.0  # left channel only
 
-    # === FFT ===
+    # === FFT + PROPER ONSET ===
     spectrum = np.abs(np.fft.rfft(audio, FFT_SIZE))
-    spectrum /= np.max(spectrum) + 1e-6
+    spectrum = np.log1p(spectrum)
 
-    # === ONSET DETECTION (SPECTRAL FLUX) ===
-    flux = np.sum(np.maximum(spectrum - prev_spectrum, 0))
-    prev_spectrum = spectrum
-    onset_strength = min(1.0, flux * 5)
+    band_mean = 0.99 * band_mean + 0.01 * spectrum
+    norm = spectrum / (band_mean + 1e-6)
+
+    flux = np.sum(np.maximum(norm - prev_spectrum, 0))
+    prev_spectrum = norm
+    onset_strength = min(1.0, flux * 2.0)
 
     # === CIRCULAR OSCILLOSCOPE ===
-    points = []
     samples = len(audio)
+    angles = np.linspace(0, 2 * np.pi, samples, endpoint=False)
+    radius = 0.4 + audio * 0.25
 
-    for i in range(samples):
-        angle = 2 * np.pi * i / samples
-        radius = 0.4 + audio[i] * 0.25
-        x = radius * np.cos(angle)
-        y = radius * np.sin(angle)
-        points.append((x, y))
+    x = radius * np.cos(angles)
+    y = radius * np.sin(angles)
 
-    points = np.array(points, dtype=np.float32)
+    points = np.column_stack((x, y)).astype(np.float32)
 
     # === DRAW ===
     glClear(GL_COLOR_BUFFER_BIT)
@@ -120,4 +122,6 @@ while running:
     pygame.display.flip()
     clock.tick(FPS)
 
+# === CLEANUP ===
+wf.close()
 pygame.quit()

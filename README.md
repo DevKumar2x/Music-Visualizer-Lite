@@ -87,3 +87,41 @@ k = FFT index.
 2. This represents signal power in that frame.
 
 3. A sudden increase in energy ⇒ beat detected.
+
+
+<h2>ARCHITECTURE DIAGRAM(proper mental model)</h2>
+                ┌────────────────────┐
+                │  Audio Output HW   │
+                └─────────▲──────────┘
+                          │
+                  single master clock
+                          │
+┌──────────────┐   ┌──────┴────────┐
+│ Audio Input  │→→ │ Audio Engine  │
+│ (stream)     │   │ (one clock!)  │
+└──────────────┘   └──────┬────────┘
+                          │
+           ┌──────────────┼──────────────┐
+           │              │              │
+     FFT / Spectrum   Onset Detection   Raw Samples
+           │              │              │
+           │              │              │
+     Log-magnitude     Beat Times     Audio Buffer
+     + normalization        │            │
+           │              │              │
+           │         BPM Tracking        │
+           │              │              │
+           └──────────────┼──────────────┘
+                          │
+                ┌─────────▼──────────┐
+                │    Render Logic    │
+                │  (NO audio logic)  │
+                └─────────┬──────────┘
+                          │
+               GPU buffers + uniforms
+                          │
+                ┌─────────▼──────────┐
+                │  OpenGL 3.3 Core   │
+                │  (VAO / VBO)       │
+                │  GPU Shaders       │
+                └────────────────────┘
