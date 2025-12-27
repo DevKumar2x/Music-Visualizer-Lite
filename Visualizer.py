@@ -1,197 +1,123 @@
 import pygame
 import wave
 import numpy as np
-import sys
-import time
+from pygame.locals import DOUBLEBUF, OPENGL, QUIT
+from OpenGL.GL import  (
+    glCreateShader, glShaderSource, glCompileShader,
+    glCreateProgram, glAttachShader, glLinkProgram,
+    glUseProgram, glGetUniformLocation, glUniform1f,
+    glClear, glEnableClientState, glDisableClientState,
+    glVertexPointer, glDrawArrays,
+    GL_VERTEX_SHADER, GL_FRAGMENT_SHADER,
+    GL_COLOR_BUFFER_BIT, GL_FLOAT, GL_LINE_LOOP, GL_VERTEX_ARRAY
+)
 
 # === CONFIG ===
 AUDIO_FILE = "Music/Ek_din01.wav"
 WIDTH, HEIGHT = 1280, 800
 FPS = 60
-BARS = 80
-BEAT_COOLDOWN = 0.25  # seconds
+FFT_SIZE = 1024
+
+# === SHADERS ===
+VERTEX_SHADER = """
+#version 330
+layout (location = 0) in vec2 position;
+void main() {
+    gl_Position = vec4(position, 0.0, 1.0);
+}
+"""
+
+FRAGMENT_SHADER = """
+#version 330
+out vec4 FragColor;
+uniform float intensity;
+void main() {
+    vec3 color = vec3(0.2, 0.9, 1.0) * intensity;
+    FragColor = vec4(color, 1.0);
+}
+"""
 
 # === INIT ===
 pygame.init()
-pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
-
-screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Ultimate Music Visualizer")
-
+pygame.mixer.init(44100, -16, 2, 512)
+pygame.display.set_mode((WIDTH, HEIGHT), DOUBLEBUF | OPENGL)
 clock = pygame.time.Clock()
-font = pygame.font.SysFont("consolas", 22)
-fullscreen = False
+
+# === OPENGL ===
+def compile_shader(src, shader_type):
+    shader = glCreateShader(shader_type)
+    glShaderSource(shader, src)
+    glCompileShader(shader)
+    return shader
+
+vs = compile_shader(VERTEX_SHADER, GL_VERTEX_SHADER)
+fs = compile_shader(FRAGMENT_SHADER, GL_FRAGMENT_SHADER)
+
+shader = glCreateProgram()
+glAttachShader(shader, vs)
+glAttachShader(shader, fs)
+glLinkProgram(shader)
+glUseProgram(shader)
+
+intensity_loc = glGetUniformLocation(shader, "intensity")
 
 # === AUDIO ===
-pygame.mixer.music.load(AUDIO_FILE)
 wf = wave.open(AUDIO_FILE, 'rb')
-
 rate = wf.getframerate()
-channels = wf.getnchannels()
-frames_per_tick = int(rate / FPS)
+frames_per_tick = rate // FPS
 
-pygame.mixer.music.play()
-
-# === STATE ===
-paused = False
-
-prev_energy = 0.0
-beat_flash = 0
-last_beat_time = 0
-beat_times = []
-bpm = 0
-
-# Safe default buffers (CRITICAL)
-last_left = np.zeros(frames_per_tick)
-last_right = np.zeros(frames_per_tick)
-last_fft_l = np.zeros(BARS)
-last_fft_r = np.zeros(BARS)
-pulse_radius = 80
-last_pulse_radius = 80
+prev_spectrum = np.zeros(FFT_SIZE // 2 + 1)
+onset_strength = 0
 
 # === MAIN LOOP ===
 running = True
+pygame.mixer.music.load(AUDIO_FILE)
+pygame.mixer.music.play()
+
 while running:
     for event in pygame.event.get():
-        if event.type == pygame.QUIT:
+        if event.type == QUIT:
             running = False
 
-        if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_ESCAPE:
-                running = False
+    data = wf.readframes(frames_per_tick)
+    if len(data) == 0:
+        break
 
-            if event.key == pygame.K_SPACE:
-                pygame.mixer.music.pause()
-                paused = True
+    audio = np.frombuffer(data, dtype=np.int16)
+    audio = audio[::2] / 32768.0  # left channel
 
-            if event.key == pygame.K_RETURN:
-                pygame.mixer.music.unpause()
-                paused = False
+    # === FFT ===
+    spectrum = np.abs(np.fft.rfft(audio, FFT_SIZE))
+    spectrum /= np.max(spectrum) + 1e-6
 
-            if event.key == pygame.K_f:
-                fullscreen = not fullscreen
-                if fullscreen:
-                    screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.FULLSCREEN)
-                else:
-                    screen = pygame.display.set_mode((WIDTH, HEIGHT))
+    # === ONSET DETECTION (SPECTRAL FLUX) ===
+    flux = np.sum(np.maximum(spectrum - prev_spectrum, 0))
+    prev_spectrum = spectrum
+    onset_strength = min(1.0, flux * 5)
 
-    # === AUDIO PROCESS ===
-    if not paused:
-        data = wf.readframes(frames_per_tick)
-        if len(data) == 0:
-            break
-
-        audio = np.frombuffer(data, dtype=np.int16)
-
-        if channels == 2:
-            left = audio[::2] / 32768.0
-            right = audio[1::2] / 32768.0
-        else:
-            left = right = audio / 32768.0
-
-        # FFT
-        fft_l = np.abs(np.fft.rfft(left))[:BARS]
-        fft_r = np.abs(np.fft.rfft(right))[:BARS]
-
-        fft_l /= np.max(fft_l) + 1e-6
-        fft_r /= np.max(fft_r) + 1e-6
-
-        # FFT smoothing
-        fft_l = 0.7 * last_fft_l + 0.3 * fft_l
-        fft_r = 0.7 * last_fft_r + 0.3 * fft_r
-
-        # Beat detection
-        energy = np.sum(left ** 2 + right ** 2)
-        now = time.time()
-
-        if (
-            energy > prev_energy * 1.4
-            and now - last_beat_time > BEAT_COOLDOWN
-        ):
-            beat_flash = 220
-            last_beat_time = now
-            beat_times.append(now)
-
-            if len(beat_times) > 10:
-                beat_times.pop(0)
-
-            if len(beat_times) >= 2:
-                bpm = int(60 / np.mean(np.diff(beat_times)))
-
-        prev_energy = energy
-        beat_flash = max(0, beat_flash - 10)
-
-        pulse_radius = min(250, int(80 + energy * 6000))
-
-        # Save frozen state
-        last_left = left
-        last_right = right
-        last_fft_l = fft_l
-        last_fft_r = fft_r
-        last_pulse_radius = pulse_radius
-
-    else:
-        left = last_left
-        right = last_right
-        fft_l = last_fft_l
-        fft_r = last_fft_r
-        pulse_radius = last_pulse_radius
-
-    # === DRAW ===
-    screen.fill((8, 8, 20))
-    bar_width = WIDTH // BARS
-    mid_y = HEIGHT // 2
-
-    # FFT bars (Spotify-style stereo)
-    for i in range(BARS):
-        hl = int(fft_l[i] * 300)
-        hr = int(fft_r[i] * 300)
-
-        x = i * bar_width
-        color = (
-            min(255, int(fft_l[i] * 400)),
-            min(255, int(fft_r[i] * 400)),
-            255
-        )
-
-        pygame.draw.rect(screen, color, (x, mid_y - hl, bar_width - 2, hl))
-        pygame.draw.rect(screen, color, (x, mid_y, bar_width - 2, hr))
-
-    # Full-width waveform
-    waveform_y = int(HEIGHT * 0.75)
-    samples = len(left)
+    # === CIRCULAR OSCILLOSCOPE ===
     points = []
+    samples = len(audio)
 
-    for x in range(WIDTH):
-        idx = min(samples - 1, int(x * samples / WIDTH))
-        y = waveform_y + int(left[idx] * 120)
+    for i in range(samples):
+        angle = 2 * np.pi * i / samples
+        radius = 0.4 + audio[i] * 0.25
+        x = radius * np.cos(angle)
+        y = radius * np.sin(angle)
         points.append((x, y))
 
-    pygame.draw.lines(screen, (0, 255, 200), False, points, 2)
+    points = np.array(points, dtype=np.float32)
 
-    # Beat glow shader
-    if beat_flash > 0:
-        glow = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-        glow.fill((255, 255, 255, beat_flash))
-        screen.blit(glow, (0, 0))
+    # === DRAW ===
+    glClear(GL_COLOR_BUFFER_BIT)
+    glUniform1f(intensity_loc, 0.5 + onset_strength)
 
-    # Center pulse
-    pygame.draw.circle(
-        screen,
-        (255, 80, 120),
-        (WIDTH // 2, HEIGHT // 2),
-        pulse_radius,
-        4
-    )
-
-    # BPM display
-    bpm_text = font.render(f"BPM: {bpm}", True, (255, 255, 255))
-    screen.blit(bpm_text, (20, 20))
+    glEnableClientState(GL_VERTEX_ARRAY)
+    glVertexPointer(2, GL_FLOAT, 0, points)
+    glDrawArrays(GL_LINE_LOOP, 0, len(points))
+    glDisableClientState(GL_VERTEX_ARRAY)
 
     pygame.display.flip()
     clock.tick(FPS)
 
-# === CLEANUP ===
-wf.close()
 pygame.quit()
-sys.exit()
